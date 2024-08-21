@@ -94,6 +94,7 @@ def preprocess(v : dict):
 
 # Create a dash application
 app = dash.Dash(__name__)
+server = app.server
 
 # Create an app layout
 app.layout = html.Div(children=[html.H1('Car Price Prediction',
