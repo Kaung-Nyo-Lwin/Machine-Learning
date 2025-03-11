@@ -1,0 +1,149 @@
+# Name of this workflow
+name: Build-Test
+# Name of this run
+run-name: ${{ github.actor }} Building and Testing
+# When this action will be trigger
+# I want to do this when we push new change with tag.
+# This tag will be used next when we build and push the image to dockerhub
+on:
+  push:
+    tags:
+      - 'v*'
+# There can be multiple jobs
+jobs:
+  # Job name
+  build-test:
+    # Target machine that this job will run on.
+    # ubuntu-latest or ubuntu-22.04 is the same image (as is August 2023)
+    runs-on: ubuntu-latest
+    # Tasks, specify in list.
+    steps:
+      # https://github.com/actions/checkout: will clone Git into the image
+      - uses: actions/checkout@v4
+      # Execute terminal command.
+      - name: Make envfile
+        uses: SpicyPizza/create-envfile@v2.0
+        with:
+          envkey_MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          envkey_APP_MODEL_NAME: ${{ secrets.APP_MODEL_NAME }}
+          file_name: .env
+          fail_on_empty: true
+          sort_keys: true
+      - name: Build the Docker image
+        run: docker compose build
+      - name: Compose up
+        run: docker compose up -d
+      # Execute pytest
+      - name: Testing
+        run: docker compose exec -it dash pytest -v
+
+      # - name: Build Docker image
+      #   run: |
+      #     docker buildx build -t kaungnyo/a3-dash:latest -f dash.Dockerfile .
+      # If the testing pass, upload the image
+      - name: Login to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      # - name: Push Docker image to Docker Hub
+      #   run: docker push kaungnyo/a3-dash:latest
+      # - name: Set up Docker Buildx
+      #   uses: docker/setup-buildx-action@v3
+      - name: Docker meta
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          # Your image name
+          images: kaungnyo/a3-dash
+          tags: type=semver,pattern={{raw}}
+          # tags: latest
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: dash.Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          # tags: latest
+  # deploy:
+  #   environment: Production
+  #   needs: build-test
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - name: SSH Remote Commands
+  #       uses: appleboy/ssh-action@v1.1.0
+  #       with:
+  #         host: ${{ vars.HOST }}
+  #         username: ${{ secrets.USERNAME }}
+  #         key: ${{ secrets.KEY }}
+  #         proxy_host: ${{ vars.PROXY_HOST }}
+  #         proxy_username: ${{ secrets.USERNAME }}
+  #         proxy_password: ${{ secrets.PASSWORD }}
+  #         script: |
+  #           tag=${{ github.ref_name }} docker compose -f st125066/docker-compose.yaml down
+  #           tag=${{ github.ref_name }} docker compose -f st125066/docker-compose.yaml up -d
+  deploy:
+    needs: build-test
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Deploy application
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.KEY }}
+          INTERMEDIATE_HOST: bazooka.cs.ait.ac.th
+          INTERMEDIATE_HOST_PASSWORD: ${{ secrets.PASSWORD }}
+          REMOTE_USER: st125066
+          REMOTE_HOST: ml.brain.cs.ait.ac.th
+          CONTAINER_NAME: dash_app
+        run: |
+          # Create SSH key file
+          echo "${{ secrets.KEY }}" > $HOME/temporary_key
+          chmod 600 $HOME/temporary_key
+
+          # Ensure .ssh directory exists
+          mkdir -p $HOME/.ssh
+
+          # Create SSH config for multi-hop setup
+          echo "Host ${INTERMEDIATE_HOST}
+            User ${REMOTE_USER}
+            Hostname ${INTERMEDIATE_HOST}
+            IdentityFile $HOME/temporary_key
+            StrictHostKeyChecking no
+
+          Host ${REMOTE_HOST}
+            User ${REMOTE_USER}
+            Hostname ${REMOTE_HOST}
+            IdentityFile $HOME/temporary_key
+            StrictHostKeyChecking no
+            ProxyCommand sshpass -p '${{ secrets.PASSWORD }}' ssh -o StrictHostKeyChecking=no -W %h:%p ${REMOTE_USER}@${INTERMEDIATE_HOST}" > $HOME/.ssh/config
+
+          # Ensure the SSH config has proper permissions
+          chmod 600 $HOME/.ssh/config
+
+          # Deploy the application to the final remote host
+          sshpass -p '${{ secrets.PASSWORD }}' ssh -tt -o StrictHostKeyChecking=no ${REMOTE_USER}@${REMOTE_HOST} << 'EOF'
+            echo "Confirming server environment..."
+            echo "Current directory: \$(pwd)"
+            echo "Listing files:"
+            ls -al
+
+            tag=${{ github.ref_name }} docker compose -f st125066/docker-compose.yaml down
+            tag=${{ github.ref_name }} docker compose -f st125066/docker-compose.yaml up -d
+
+            # echo "Pulling the latest Docker image..."
+            # docker pull kaungnyo/a3-dash:latest || { echo "Docker not found. Exiting."; exit 1; }
+            
+            # echo "Stopping existing containers..."
+            # docker compose -f st125066/docker-compose.yaml down || true 
+            
+            # echo "Starting containers with Docker Compose..."
+            # docker compose -f st125066/docker-compose.yaml up -d 
+
+            exit  # End the SSH session
+          EOF
+
+          # Clean up
+          rm -f $HOME/temporary_key
+          rm -f $HOME/.ssh/config
