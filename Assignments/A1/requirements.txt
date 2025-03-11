@@ -1,0 +1,8 @@
+dash
+gunicorn
+pandas
+dash_bootstrap_components
+dash-bootstrap-components[pandas]
+pandas
+numpy
+scikit-learn
